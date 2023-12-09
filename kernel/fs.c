@@ -386,42 +386,63 @@ bmap(struct inode *ip, uint bn)
   struct buf *bp;
 
   if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0){
-      addr = balloc(ip->dev);
-      if(addr == 0)
-        return 0;
-      ip->addrs[bn] = addr;
-    }
+    if((addr = ip->addrs[bn]) == 0)
+      ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
   }
+  //indicates that bn > NDIRECT, and the logical number of the block
+  //in the first level indirect directory should be calculated
   bn -= NDIRECT;
 
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT]) == 0){
-      addr = balloc(ip->dev);
-      if(addr == 0)
-        return 0;
-      ip->addrs[NDIRECT] = addr;
-    }
+    if((addr = ip->addrs[NDIRECT]) == 0)
+      ip->addrs[NDIRECT] = addr = balloc(ip->dev);
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
     if((addr = a[bn]) == 0){
-      addr = balloc(ip->dev);
-      if(addr){
-        a[bn] = addr;
-        log_write(bp);
-      }
+      a[bn] = addr  = balloc(ip->dev); 
+      log_write(bp);
     }
     brelse(bp);
     return addr;
   }
+  //indicates that the bn>NINDIRECT , and the logical number of the block 
+  //in the second-level  indirect directory  should be calculated
+  bn -= NINDIRECT;
 
-  panic("bmap: out of range");
+  if(bn>= NDINDIRECT)
+     panic("bmap: out of range");
+
+  //move the  second-level indirect directory of the buffer cache
+  if((addr = ip->addrs[NDIRECT+1]) == 0)
+    ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+  bp = bread(ip->dev, addr);
+  a = (uint*)bp->data; //navigate to the second level indirect directory
+  uint i = bn/NINDIRECT; //navigate to the i-th entry in the secondlevel
+                         //indirect directory
+  bn %= NINDIRECT;      //the bn-th block
+
+  //move to the third level indirect directory to the buffer cache
+  if((addr = a[i]) == 0){
+    a[i] = addr = balloc(ip->dev);
+   log_write(bp);
+  }
+  brelse(bp);
+
+  bp = bread(ip->dev, addr);
+  a = (uint*)bp->data; //navigate to the third leven indirect directory
+  if((addr = a[bn]) == 0){ //the bn-th block
+    a[bn] = addr = balloc(ip->dev);
+    log_write(bp);
+  }
+  brelse(bp);
+  return addr;
 }
 
 // Truncate inode (discard contents).
 // Caller must hold ip->lock.
+// clear the file content contained in the inode
 void
 itrunc(struct inode *ip)
 {
@@ -429,13 +450,15 @@ itrunc(struct inode *ip)
   struct buf *bp;
   uint *a;
 
+  //clear the first-level indirect directory
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
       ip->addrs[i] = 0;
     }
   }
-
+  
+  //clear the second-level indirect directory
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -447,7 +470,30 @@ itrunc(struct inode *ip)
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
   }
+  
+  //clear the third-level indirect directory
+  if(!ip->addrs[NDIRECT+1])
+    goto truncDone;
 
+  bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+  a = (uint*)bp->data; //first navigate to the second-level indirect directory
+  for(int i = 0; i<NINDIRECT;i++){//traverse each non empty third level
+                                  //indirect directory in the sec-lev dir
+    if(!a[i])
+      continue;
+    struct buf *bp2 = bread(ip->dev, *(a+i));
+    uint *a2 = (uint*)bp2->data; //navigate to the non empty third lev ind dir
+    for(int j=0; j<NINDIRECT; j++){
+      if(a2[j]) bfree(ip->dev, a2[j]);
+    }
+    a2[j] = 0;
+    brelse(bp2);
+  }
+  brelse(bp);
+  bfree(ip->dev, ip->addrs[NDIRECT+1]);
+  ip->addrs[NDIRECT+1] = 0;
+
+truncDone:
   ip->size = 0;
   iupdate(ip);
 }

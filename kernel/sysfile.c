@@ -120,6 +120,44 @@ sys_fstat(void)
 }
 
 // Create the path new as a link to the same inode as old.
+//
+static struct inode*
+symlinkroot(struct inode *ip)
+{
+  uint visited[SYMLINKDEPTH];
+  char path[MAXPATH];
+
+  //the lock must be held by the ip before the for loop
+  for(int i=0; i<SYMLINKDEPTH; i++){
+    visited[i] = ip->inum;
+
+    //the lock must be held by the ip before the calling readi
+    if(readi(ip, 0, (uint64)path, 0, MAXPATH) <=0)
+      goto rootFail;
+
+    //go to the parent inode of the symlink 
+    iunlockput(ip); //do not carry the lock when calling namei
+                    //otherwise it may cause a deadlock as namei may manipulate ip
+    if((ip=namei(path))==0)
+      return 0;
+
+    for (int tail=i; tail>=0; tail--){
+      if(ip->inum == visited[tail])
+        return 0;
+    }
+
+    //not a cycle
+    ilock(ip);
+    if(ip->type != T_SYMLINK) //return to the upper layer while holding the lock
+      return ip;
+  }
+
+rootFail:
+  iunlockput(ip);
+  return 0;
+
+}
+
 uint64
 sys_link(void)
 {
@@ -309,10 +347,9 @@ sys_open(void)
   struct file *f;
   struct inode *ip;
   int n;
+  if(((n = argstr(0, path, MAXPATH)) < 0) || argint(1, &omode) < 0)
+      return -1;
 
-  argint(1, &omode);
-  if((n = argstr(0, path, MAXPATH)) < 0)
-    return -1;
 
   begin_op();
 
@@ -340,6 +377,15 @@ sys_open(void)
     end_op();
     return -1;
   }
+  
+  //symbolic link business process
+  if(ip->type==T_SYMLINK && (omode & O_NOFOLLOW)==0){
+    //attempting to trace back to the root from ip
+    if((ip=symlinkroot(ip))==0){ //if the tracing back fails, put the lock in 
+      end_op();                 //symlinkroot . this is a sacrifice made due to
+      return -1;                //limitations in the code encapsulation 
+    }
+  }
 
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
@@ -364,8 +410,8 @@ sys_open(void)
     itrunc(ip);
   }
 
-  iunlock(ip);
-  end_op();
+  iunlock(ip); //for successfully opened inodes,  release the lock uniformly
+  end_op();    //at the end
 
   return fd;
 }
@@ -501,5 +547,38 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  struct inode *ip;
+  char target[MAXPATH], path[MAXPATH];
+
+  if(argstr(0, target, MAXPATH)<0 || argstr(1, path, MAXPATH)<0)
+    return -1;
+
+  begin_op();
+
+  //attempt to allocate an inode named path as a symbolic link inode
+  if((ip=create(path, T_SYMLINK, 0, 0))==0){
+  //after calling create, still holding ip->lock because create hasnt released it
+  end_op();
+  return -1;
+  }
+
+  //write the target file path tname into the first block  of ip
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) < 0){
+    //holding ip->lock is requred before calling writei
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  //therefore ip->lock needs to be released after writei
+  iunlockput(ip); //iunlockput = iunlock + iput
+
+  end_op();
   return 0;
 }

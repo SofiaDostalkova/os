@@ -21,12 +21,13 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmems[NCPU];
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for(int i = 0; i<NCPU; i++)
+     initlock(&kmems[i].lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -56,10 +57,17 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  //when optaining cpuid interrupt should be disabled
+  //after finishing, reenable
+  push_off();
+  int id = cpuid();
+  pop_off();
+
+//return the idle page to the cpu with id ID 
+  acquire(&kmems[id].lock);
+  r->next = kmems[id].freelist;
+  kmems[id].freelist = r;
+  release(&kmems[id].lock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -69,14 +77,50 @@ void *
 kalloc(void)
 {
   struct run *r;
+  //when obtaining cpuid interrupt should be disabled.
+  //after obtaining, reenable
+  push_off();
+  int id = cpuid();
+  pop_off();
+  
+//attempt to obtain the remaining pages
+  acquire(&kmems[id].lock);
+  r = kmems[id].freelist;
+  if(r){
+    kmems[id].freelist = r->next;
+  }else{
+    for(int i = 0; i<NCPU; i++){
+      if(i == id)
+        continue;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+      //attempt to steal a free page from other cpu
+      acquire(&kmems[i].lock);
+      if(!kmems[i].freelist){
+        release(&kmems[i].lock);
+        continue;
+      }
 
-  if(r)
+      r = kmems[i].freelist;
+      kmems[i].freelist = r->next;
+      release(&kmems[i].lock);
+      break;
+    }
+  }
+  //we have to release the lock here
+  //if we hold the lock and trz to steal other cpus freelist,
+  //we will get a deadlock
+  //ex cpu a holds lock A to grab lock B,
+  //cpu 2 holds B tries to grab lock A
+  release(&kmems[id].lock);
+   //there is a possibility. the cpu with id ID has no idle page
+   //and has not stolen any
+    
+  if (r)
     memset((char*)r, 5, PGSIZE); // fill with junk
+  
   return (void*)r;
 }
+//1. try to get free memory from processes own free list
+//2. steal free memory from other process free list
+//3. use lock when accessing a free list
+//4. dont hold more than one lock to avoid a deadlock

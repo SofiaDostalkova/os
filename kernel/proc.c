@@ -274,6 +274,18 @@ growproc(int n)
   return 0;
 }
 
+//copy vmas of parent proc for mmap
+//need to increase file reference count
+void
+fork_mmap(struct proc *np, struct proc *p)
+{
+  for (int i = 0; i< NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
+      filedup(np->vmas[i].f);
+    }
+  }
+}
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int
@@ -309,7 +321,8 @@ fork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
-
+  
+  fork_mmap(np, p);
   pid = np->pid;
 
   release(&np->lock);
@@ -324,6 +337,7 @@ fork(void)
 
   return pid;
 }
+
 
 // Pass p's abandoned children to init.
 // Caller must hold wait_lock.
@@ -360,6 +374,13 @@ exit(int status)
     }
   }
 
+  //munmap
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+       munmap(p->vmas[i].start, p->vmas[i].length);
+       p->vmas[i].used = 0;
+    }
+  }
   begin_op();
   iput(p->cwd);
   end_op();

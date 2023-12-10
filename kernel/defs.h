@@ -148,9 +148,9 @@ int             strncmp(const char*, const char*, uint);
 char*           strncpy(char*, const char*, int);
 
 // syscall.c
-void            argint(int, int*);
+int            argint(int, int*);
 int             argstr(int, char*, int);
-void            argaddr(int, uint64 *);
+int            argaddr(int, uint64 *);
 int             fetchstr(uint64, char*, int);
 int             fetchaddr(uint64, uint64*);
 void            syscall();
@@ -187,7 +187,9 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
-
+int             vm_exists(pagetable_t, uint64);
+int             mmap_pgfault(uint64, struct proc *);
+int             munmap(uint64, int);
 // plic.c
 void            plicinit(void);
 void            plicinithart(void);

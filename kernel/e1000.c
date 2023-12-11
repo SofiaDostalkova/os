@@ -91,7 +91,7 @@ e1000_init(uint32 *xregs)
   regs[E1000_RADV] = 0; // interrupt after every packet (no timer)
   regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
 }
-
+//interrupt triggered, DMA hands over data to NIC, waiting to be sent out 
 int
 e1000_transmit(struct mbuf *m)
 {
@@ -103,9 +103,33 @@ e1000_transmit(struct mbuf *m)
   // a pointer so that it can be freed after sending.
   //
   
+ acquire(&e1000_lock);
+
+  uint32 idx = regs[E1000_TDT]; //m is in memory
+  
+  //work that was not completed before tx ring 
+  if((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0){
+    release(&e1000_lock);
+    return -1;
+  }
+  
+  //release the mbuf previously attached to tx mbufs = return it to memory
+  if(tx_mbufs[idx])
+    mbuffree(tx_mbufs[idx]);
+  //attach the in memory mbuf to tx ring, this mbuf contains the data we need to transmit
+  tx_mbufs[idx] = m;
+  tx_ring[idx].length = m->len; //populate some metadata for m
+  tx_ring[idx].addr = (uint64)m->head;
+  tx_ring[idx].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+
+  regs[E1000_TDT] = (idx+1)%TX_RING_SIZE;//circular queue points to the next available slot
+                                         //preparing for the next transfer operation 
+  release(&e1000_lock);
+
   return 0;
 }
-
+//interrupt triggered, DMA reads the received packets. at this point the packets
+//are already in memory
 static void
 e1000_recv(void)
 {
@@ -115,6 +139,23 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  while(1){
+    uint32 idx = (regs[E1000_RDT] + 1)%RX_RING_SIZE;//create space for just received packet
+    //no packet to read at the moment
+    if((rx_ring[idx].status & E1000_RXD_STAT_DD) == 0)
+      return;
+    //transfer the packet stored in rx mbufs to the application later
+    rx_mbufs[idx]->len = rx_ring[idx].length;
+    net_rx(rx_mbufs[idx]);
+  //refresh rx ring for preparing to receive the next batch of packets
+    if((rx_mbufs[idx] = mbufalloc(0)) == 0)
+      panic("e1000 _recv");
+
+    rx_ring[idx].addr = (uint64)rx_mbufs[idx]->head;
+    rx_ring[idx].status = 0;
+
+    regs[E1000_RDT] = idx;
+  }
 }
 
 void
